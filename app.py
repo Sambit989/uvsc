@@ -268,7 +268,11 @@ with tab1:
         import os
         # Save uploaded file to temp path to stream it uniformly
         temp_in = tempfile.NamedTemporaryFile(delete=False)
-        temp_in.write(uploaded_file.read())
+        while True:
+            chunk = uploaded_file.read(1024 * 1024 * 10) # 10MB chunks
+            if not chunk:
+                break
+            temp_in.write(chunk)
         temp_in.close()
         file_to_encode = temp_in.name
     elif input_method == "Local File Path (For massive files > 200MB)" and local_path:
