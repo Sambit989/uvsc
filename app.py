@@ -277,7 +277,12 @@ with tab1:
         file_to_encode = temp_in.name
     elif input_method == "Local File Path (For massive files > 200MB)" and local_path:
         import os
-        cleaned_path = local_path.strip().strip('"').strip("'")
+        # Windows sometimes inserts hidden directional characters when copying paths
+        cleaned_path = local_path.strip(' \t\n\r"\'\u202a\u202b\u202c\u200e\u200f')
+        
+        # Additional safety to remove any leading/trailing whitespace again
+        cleaned_path = cleaned_path.strip()
+        
         if os.path.exists(cleaned_path):
             file_to_encode = cleaned_path
         else:
