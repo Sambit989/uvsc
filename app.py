@@ -248,27 +248,78 @@ tab1, tab2, tab3 = st.tabs(["Encoder", "Decoder (Live Camera)", "Theoretical Cal
 
 with tab1:
     st.header("Encode a Massive File (Video Output)")
-    uploaded_file = st.file_uploader("Upload any file", key="enc_up")
+    
+    input_method = st.radio("Input Method", ["Upload via Browser", "Local File Path (For massive files > 200MB)"])
+    uploaded_file = None
+    local_path = ""
+    
+    if input_method == "Upload via Browser":
+        uploaded_file = st.file_uploader("Upload any file", key="enc_up")
+    else:
+        local_path = st.text_input("Enter the absolute file path (e.g., C:/Users/name/large_file.mp4)")
+        
     mode = st.selectbox("Encoding Mode", ["S=2 (Binary)", "S=16 (Grayscale)", "S=4096 (RGB + ZLIB)"], key="enc_mode")
     cell_size_px = st.slider("Pixels per Cell (Smaller = Smaller Output File)", min_value=2, max_value=20, value=10)
     password = st.text_input("AES-256 Encryption Password (Optional)", type="password", key="enc_pass")
     
-    if uploaded_file is not None:
-        payload = uploaded_file.read()
-        st.write(f"Original Size: **{len(payload)} bytes**")
+    file_to_encode = None
+    if input_method == "Upload via Browser" and uploaded_file is not None:
+        import tempfile
+        import os
+        # Save uploaded file to temp path to stream it uniformly
+        temp_in = tempfile.NamedTemporaryFile(delete=False)
+        temp_in.write(uploaded_file.read())
+        temp_in.close()
+        file_to_encode = temp_in.name
+    elif input_method == "Local File Path (For massive files > 200MB)" and local_path:
+        import os
+        if os.path.exists(local_path):
+            file_to_encode = local_path
+        else:
+            if local_path != "": st.error("File not found.")
+            
+    if file_to_encode is not None:
+        import os
+        original_size = os.path.getsize(file_to_encode)
+        st.write(f"Original Size: **{original_size} bytes**")
         
         if st.button("Generate UVSC Video"):
             with st.spinner("Chunking file & generating animated sequence..."):
+                import tempfile
+                import zipfile
+                import math
+                import struct
                 
-                # Phase 12: Embed SHA-256 Checksum
-                file_hash = hashlib.sha256(payload).digest()
-                payload = file_hash + payload
-                
+                # Streaming Pre-processing Pipeline (ZLIB + FERNET)
+                temp_processed = tempfile.NamedTemporaryFile(delete=False).name
                 fernet = get_fernet_key(password)
-                if fernet:
-                    payload = fernet.encrypt(payload)
-                if mode == "S=4096 (RGB + ZLIB)":
-                    payload = zlib.compress(payload, level=9)
+                
+                sha256 = hashlib.sha256()
+                with open(file_to_encode, 'rb') as f_in, open(temp_processed, 'wb') as f_out:
+                    # Reserve 32 bytes for SHA256 at the front
+                    f_out.write(b'\x00' * 32)
+                    
+                    while True:
+                        block = f_in.read(1024 * 1024 * 10) # 10 MB chunks
+                        if not block:
+                            break
+                        
+                        sha256.update(block)
+                        
+                        if mode == "S=4096 (RGB + ZLIB)":
+                            block = zlib.compress(block, level=9)
+                            
+                        if fernet:
+                            block = fernet.encrypt(block)
+                            
+                        # Write length of block and block itself
+                        f_out.write(struct.pack('>I', len(block)))
+                        f_out.write(block)
+                        
+                    # Go back and write final hash
+                    final_hash = sha256.digest()
+                    f_out.seek(0)
+                    f_out.write(final_hash)
                 
                 if mode == "S=4096 (RGB + ZLIB)": chunk_size = 2000
                 elif mode == "S=16 (Grayscale)": chunk_size = 600
@@ -281,21 +332,19 @@ with tab1:
                 while (fixed_grid_size * fixed_grid_size) - (3 * 64) < total_dummy_cells:
                     fixed_grid_size += 1
                 
-                import tempfile
-                import zipfile
-                import os
-                import math
-                
-                frames_count = math.ceil(len(payload) / chunk_size)
+                processed_size = os.path.getsize(temp_processed)
+                frames_count = math.ceil(processed_size / chunk_size)
                 
                 temp_dir = tempfile.mkdtemp()
                 zip_path = os.path.join(temp_dir, "uvsc_sequence.zip")
                 
                 progress_bar = st.progress(0)
                 
-                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for idx, i in enumerate(range(0, len(payload), chunk_size)):
-                        chunk = payload[i:i+chunk_size]
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf, open(temp_processed, 'rb') as f_proc:
+                    for idx in range(frames_count):
+                        chunk = f_proc.read(chunk_size)
+                        if not chunk: break
+                        
                         data, mode_id = encode_chunk(chunk, mode)
                         grid = build_grid(data, mode_id, fixed_grid_size=fixed_grid_size)
                         img = cv2.resize(grid, (grid.shape[1] * cell_size_px, grid.shape[0] * cell_size_px), interpolation=cv2.INTER_NEAREST)
@@ -305,6 +354,14 @@ with tab1:
                         _, buffer = cv2.imencode('.png', img_with_border)
                         zipf.writestr(f"frame_{idx:05d}.png", buffer.tobytes())
                         progress_bar.progress((idx + 1) / frames_count)
+                
+                # Cleanup
+                try:
+                    os.remove(temp_processed)
+                    if input_method == "Upload via Browser":
+                        os.remove(file_to_encode)
+                except Exception:
+                    pass
                 
                 st.success(f"Generated successfully! Split into {frames_count} frames.")
                 
@@ -417,16 +474,36 @@ with tab2:
                 
                 if success:
                     try:
-                        if detected_mode_id == 2: # RGB + ZLIB
-                            reconstructed_bytes = zlib.decompress(reconstructed_bytes)
-                        fernet = get_fernet_key(dec_password)
-                        if fernet:
-                            reconstructed_bytes = fernet.decrypt(reconstructed_bytes)
-                            
-                        # Verify SHA-256 Checksum
+                        import struct
+                        # Streaming Decryption & Decompression
                         embedded_hash = reconstructed_bytes[:32]
-                        original_payload = reconstructed_bytes[32:]
-                        calculated_hash = hashlib.sha256(original_payload).digest()
+                        payload_data = reconstructed_bytes[32:]
+                        
+                        fernet = get_fernet_key(dec_password)
+                        calculated_sha256 = hashlib.sha256()
+                        
+                        original_payload = bytearray()
+                        
+                        offset = 0
+                        while offset < len(payload_data):
+                            if offset + 4 > len(payload_data):
+                                break
+                            chunk_len = struct.unpack('>I', payload_data[offset:offset+4])[0]
+                            offset += 4
+                            
+                            chunk = payload_data[offset:offset+chunk_len]
+                            offset += chunk_len
+                            
+                            if fernet:
+                                chunk = fernet.decrypt(bytes(chunk))
+                                
+                            if detected_mode_id == 2: # RGB + ZLIB
+                                chunk = zlib.decompress(bytes(chunk))
+                                
+                            calculated_sha256.update(chunk)
+                            original_payload.extend(chunk)
+                            
+                        calculated_hash = calculated_sha256.digest()
                         
                         if embedded_hash == calculated_hash:
                             st.success(f"✅ CRYPTOGRAPHIC VERIFICATION PASSED: File successfully recovered via Mode {detected_mode_id}")
