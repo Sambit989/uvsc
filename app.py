@@ -277,10 +277,11 @@ with tab1:
         file_to_encode = temp_in.name
     elif input_method == "Local File Path (For massive files > 200MB)" and local_path:
         import os
-        if os.path.exists(local_path):
-            file_to_encode = local_path
+        cleaned_path = local_path.strip().strip('"').strip("'")
+        if os.path.exists(cleaned_path):
+            file_to_encode = cleaned_path
         else:
-            if local_path != "": st.error("File not found.")
+            if local_path != "": st.error(f"File not found: {cleaned_path}")
             
     if file_to_encode is not None:
         import os
