@@ -83,11 +83,14 @@ def encode_chunk(payload_bytes, mode):
             
     return cells, mode_id
 
-def build_grid(data, mode_id):
+def build_grid(data, mode_id, fixed_grid_size=None):
     total_cells = len(data)
-    grid_size = 21
-    while (grid_size * grid_size) - (3 * 64) < total_cells:
-        grid_size += 1
+    if fixed_grid_size is not None:
+        grid_size = fixed_grid_size
+    else:
+        grid_size = 21
+        while (grid_size * grid_size) - (3 * 64) < total_cells:
+            grid_size += 1
         
     grid = np.ones((grid_size, grid_size, 3), dtype=np.uint8) * 255
     fp = create_finder_pattern()
@@ -265,11 +268,18 @@ with tab1:
                 elif mode == "S=16 (Grayscale)": chunk_size = 600
                 else: chunk_size = 100
                 
+                dummy_chunk = b'\x00' * chunk_size
+                dummy_data, _ = encode_chunk(dummy_chunk, mode)
+                total_dummy_cells = len(dummy_data)
+                fixed_grid_size = 21
+                while (fixed_grid_size * fixed_grid_size) - (3 * 64) < total_dummy_cells:
+                    fixed_grid_size += 1
+                
                 frames = []
                 for i in range(0, len(payload), chunk_size):
                     chunk = payload[i:i+chunk_size]
                     data, mode_id = encode_chunk(chunk, mode)
-                    grid = build_grid(data, mode_id)
+                    grid = build_grid(data, mode_id, fixed_grid_size=fixed_grid_size)
                     img = cv2.resize(grid, (grid.shape[1] * CELL_SIZE, grid.shape[0] * CELL_SIZE), interpolation=cv2.INTER_NEAREST)
                     border = CELL_SIZE * 4
                     img_with_border = cv2.copyMakeBorder(img, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255])
