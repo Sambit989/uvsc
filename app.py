@@ -289,7 +289,7 @@ with tab1:
                 
                 if len(frames) == 1:
                     pil_img = Image.fromarray(frames[0])
-                    st.image(pil_img, caption="UVSC Visual Code", use_container_width=True)
+                    st.image(pil_img, caption="UVSC Visual Code", width="stretch")
                     buf = io.BytesIO()
                     pil_img.save(buf, format="PNG")
                     st.download_button("Download UVSC Code", buf.getvalue(), file_name="uvsc_code.png", mime="image/png")
@@ -297,7 +297,7 @@ with tab1:
                     st.write(f"Generated a {len(frames)}-frame Video Sequence!")
                     gif_buf = io.BytesIO()
                     imageio.mimsave(gif_buf, frames, format='GIF', duration=200) # 5 fps
-                    st.image(gif_buf.getvalue(), use_container_width=True)
+                    st.image(gif_buf.getvalue(), width="stretch")
                     st.download_button("Download UVSC Sequence (.gif)", gif_buf.getvalue(), file_name="uvsc_sequence.gif", mime="image/gif")
 
 with tab2:
@@ -307,7 +307,7 @@ with tab2:
     dec_password = st.text_input("Decryption Password (if encoded)", type="password", key="dec_pass")
     
     st.write("### Choose Input Source")
-    input_source = st.radio("", ["Upload Image/GIF", "Live Camera Scan"])
+    input_source = st.radio("Input Source", ["Upload Image/GIF", "Live Camera Scan"], label_visibility="collapsed")
     
     file_bytes = None
     frames_to_process = []
@@ -320,12 +320,12 @@ with tab2:
                 gif = imageio.mimread(file_bytes)
                 for frame in gif:
                     frames_to_process.append(cv2.cvtColor(frame[:,:,:3], cv2.COLOR_RGB2BGR))
-                st.image(file_bytes, caption=f"Uploaded {len(frames_to_process)}-frame Sequence", use_container_width=True)
+                st.image(file_bytes, caption=f"Uploaded {len(frames_to_process)}-frame Sequence", width="stretch")
             else:
                 nparr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 frames_to_process.append(img)
-                st.image(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)), caption="Uploaded Artifact", use_container_width=True)
+                st.image(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)), caption="Uploaded Artifact", width="stretch")
     
     elif input_source == "Live Camera Scan":
         camera_photo = st.camera_input("Point your camera at the UVSC Code")
