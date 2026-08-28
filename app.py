@@ -19,6 +19,10 @@ CELL_SIZE = 10
 ECC_SYMBOLS = 64
 MAX_GRID_SIZE = 40
 
+@st.cache_resource
+def get_rs_codec():
+    return reedsolo.RSCodec(ECC_SYMBOLS)
+
 def get_fernet_key(password):
     if not password:
         return None
@@ -48,7 +52,7 @@ def deinterleave_bytes(data_bytes):
     return deinterleaved
 
 def encode_chunk(payload_bytes, mode):
-    rs = reedsolo.RSCodec(ECC_SYMBOLS)
+    rs = get_rs_codec()
     encoded = bytearray(rs.encode(payload_bytes))
     
     # Phase 8: Data Interleaving
@@ -157,14 +161,15 @@ def align_image(img_array):
         
     return img_array
 
-def decode_image(img_array):
-    aligned = align_image(img_array)
-    
-    border = 40
-    if aligned.shape[0] == 600:
-        border = int(600 * 0.05)
+def decode_image(img_array, is_live=False):
+    if is_live:
+        aligned = align_image(img_array)
+        border = int(aligned.shape[0] * 0.05) if aligned.shape[0] == 600 else 40
+    else:
+        aligned = img_array
+        border = 40
         
-    cropped = aligned[border:-border, border:-border]
+    cropped = aligned[border:aligned.shape[0]-border, border:aligned.shape[1]-border] if border > 0 else aligned
     
     for grid_size in range(15, 60):
         warped = cv2.resize(cropped, (grid_size * 10, grid_size * 10))
@@ -209,7 +214,7 @@ def decode_image(img_array):
                         
                 cell_idx += 1
 
-        if mode_id == -1 or byte_length <= 0:
+        if mode_id not in (0, 1, 2) or byte_length <= ECC_SYMBOLS:
             continue
             
         data_bytes = bytearray()
@@ -232,7 +237,7 @@ def decode_image(img_array):
         # Deinterleave
         data_bytes = deinterleave_bytes(data_bytes)
                 
-        rs = reedsolo.RSCodec(ECC_SYMBOLS)
+        rs = get_rs_codec()
         try:
             return rs.decode(data_bytes)[0], mode_id
         except Exception:
@@ -245,6 +250,7 @@ with tab1:
     st.header("Encode a Massive File (Video Output)")
     uploaded_file = st.file_uploader("Upload any file", key="enc_up")
     mode = st.selectbox("Encoding Mode", ["S=2 (Binary)", "S=16 (Grayscale)", "S=4096 (RGB + ZLIB)"], key="enc_mode")
+    cell_size_px = st.slider("Pixels per Cell (Smaller = Smaller Output File)", min_value=2, max_value=20, value=10)
     password = st.text_input("AES-256 Encryption Password (Optional)", type="password", key="enc_pass")
     
     if uploaded_file is not None:
@@ -275,30 +281,43 @@ with tab1:
                 while (fixed_grid_size * fixed_grid_size) - (3 * 64) < total_dummy_cells:
                     fixed_grid_size += 1
                 
-                frames = []
-                for i in range(0, len(payload), chunk_size):
-                    chunk = payload[i:i+chunk_size]
-                    data, mode_id = encode_chunk(chunk, mode)
-                    grid = build_grid(data, mode_id, fixed_grid_size=fixed_grid_size)
-                    img = cv2.resize(grid, (grid.shape[1] * CELL_SIZE, grid.shape[0] * CELL_SIZE), interpolation=cv2.INTER_NEAREST)
-                    border = CELL_SIZE * 4
-                    img_with_border = cv2.copyMakeBorder(img, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-                    frames.append(cv2.cvtColor(img_with_border, cv2.COLOR_BGR2RGB))
+                import tempfile
+                import zipfile
+                import os
+                import math
                 
-                st.success(f"Generated successfully! Split into {len(frames)} frames.")
+                frames_count = math.ceil(len(payload) / chunk_size)
                 
-                if len(frames) == 1:
-                    pil_img = Image.fromarray(frames[0])
-                    st.image(pil_img, caption="UVSC Visual Code", width="stretch")
-                    buf = io.BytesIO()
-                    pil_img.save(buf, format="PNG")
-                    st.download_button("Download UVSC Code", buf.getvalue(), file_name="uvsc_code.png", mime="image/png")
+                temp_dir = tempfile.mkdtemp()
+                zip_path = os.path.join(temp_dir, "uvsc_sequence.zip")
+                
+                progress_bar = st.progress(0)
+                
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for idx, i in enumerate(range(0, len(payload), chunk_size)):
+                        chunk = payload[i:i+chunk_size]
+                        data, mode_id = encode_chunk(chunk, mode)
+                        grid = build_grid(data, mode_id, fixed_grid_size=fixed_grid_size)
+                        img = cv2.resize(grid, (grid.shape[1] * cell_size_px, grid.shape[0] * cell_size_px), interpolation=cv2.INTER_NEAREST)
+                        border = 40
+                        img_with_border = cv2.copyMakeBorder(img, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+                        
+                        _, buffer = cv2.imencode('.png', img_with_border)
+                        zipf.writestr(f"frame_{idx:05d}.png", buffer.tobytes())
+                        progress_bar.progress((idx + 1) / frames_count)
+                
+                st.success(f"Generated successfully! Split into {frames_count} frames.")
+                
+                if frames_count == 1:
+                    with zipfile.ZipFile(zip_path, 'r') as zipf:
+                        img_bytes = zipf.read("frame_00000.png")
+                    st.image(img_bytes, caption="UVSC Visual Code", width="stretch")
+                    st.download_button("Download UVSC Code", img_bytes, file_name="uvsc_code.png", mime="image/png")
                 else:
-                    st.write(f"Generated a {len(frames)}-frame Video Sequence!")
-                    gif_buf = io.BytesIO()
-                    imageio.mimsave(gif_buf, frames, format='GIF', duration=200) # 5 fps
-                    st.image(gif_buf.getvalue(), width="stretch")
-                    st.download_button("Download UVSC Sequence (.gif)", gif_buf.getvalue(), file_name="uvsc_sequence.gif", mime="image/gif")
+                    st.write(f"Generated a {frames_count}-frame Sequence (.zip)")
+                    with open(zip_path, "rb") as f:
+                        st.download_button("Download UVSC Sequence (.zip)", f, file_name="uvsc_sequence.zip", mime="application/zip")
+
 
 with tab2:
     st.header("Autonomous Live Decoder")
@@ -310,48 +329,92 @@ with tab2:
     input_source = st.radio("Input Source", ["Upload Image/GIF", "Live Camera Scan"], label_visibility="collapsed")
     
     file_bytes = None
-    frames_to_process = []
+    preview_img = None
+    num_frames = 0
     
     if input_source == "Upload Image/GIF":
-        dec_file = st.file_uploader("Upload UVSC Image/GIF", type=['png', 'jpg', 'jpeg', 'gif'], key="dec_up")
+        dec_file = st.file_uploader("Upload UVSC Image/GIF/ZIP", type=['png', 'jpg', 'jpeg', 'gif', 'zip'], key="dec_up")
         if dec_file:
             file_bytes = dec_file.read()
-            if dec_file.name.endswith('.gif'):
-                gif = imageio.mimread(file_bytes)
-                for frame in gif:
-                    frames_to_process.append(cv2.cvtColor(frame[:,:,:3], cv2.COLOR_RGB2BGR))
-                st.image(file_bytes, caption=f"Uploaded {len(frames_to_process)}-frame Sequence", width="stretch")
+            if dec_file.name.endswith('.zip'):
+                import zipfile
+                with zipfile.ZipFile(dec_file, 'r') as zipf:
+                    names = sorted([n for n in zipf.namelist() if n.endswith('.png')])
+                    num_frames = len(names)
+                    if num_frames > 0:
+                        preview_bytes = zipf.read(names[0])
+                        nparr = np.asarray(bytearray(preview_bytes), dtype=np.uint8)
+                        preview_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            elif dec_file.name.endswith('.gif'):
+                import imageio
+                reader = imageio.get_reader(file_bytes)
+                num_frames = reader.get_length()
+                if num_frames > 0:
+                    first_frame = reader.get_data(0)
+                    preview_img = cv2.cvtColor(first_frame[:,:,:3], cv2.COLOR_RGB2BGR)
             else:
                 nparr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                frames_to_process.append(img)
-                st.image(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)), caption="Uploaded Artifact", width="stretch")
+                preview_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                num_frames = 1
+                
+            if preview_img is not None:
+                st.image(Image.fromarray(cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)), caption=f"Uploaded {num_frames}-frame Sequence", width="stretch")
     
     elif input_source == "Live Camera Scan":
         camera_photo = st.camera_input("Point your camera at the UVSC Code")
         if camera_photo:
             file_bytes = camera_photo.read()
             nparr = np.asarray(bytearray(file_bytes), dtype=np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            frames_to_process.append(img)
+            preview_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            num_frames = 1
             
-    if len(frames_to_process) > 0:
+    if num_frames > 0:
         if st.button("Decode Sequence"):
-            with st.spinner(f"Aligning perspective & extracting Universal Header..."):
+            with st.spinner(f"Decoding {num_frames} frame(s)..."):
                 reconstructed_bytes = bytearray()
                 success = True
                 detected_mode_id = -1
                 
-                for idx, frame in enumerate(frames_to_process):
-                    decoded_chunk, mode_id = decode_image(frame)
-                    if decoded_chunk:
+                is_live = (input_source == "Live Camera Scan")
+                progress_bar = st.progress(0)
+                
+                def process_frame(idx, frame):
+                    global success, detected_mode_id, reconstructed_bytes
+                    decoded_chunk, mode_id = decode_image(frame, is_live=is_live)
+                    if decoded_chunk is not None:
                         reconstructed_bytes.extend(decoded_chunk)
                         detected_mode_id = mode_id
                     else:
                         st.error(f"Failed to decode Frame {idx+1}. Perspective alignment failed or damage too severe.")
                         success = False
-                        break
-                        
+                
+                if input_source == "Upload Image/GIF":
+                    if dec_file.name.endswith('.zip'):
+                        import zipfile
+                        with zipfile.ZipFile(dec_file, 'r') as zipf:
+                            names = sorted([n for n in zipf.namelist() if n.endswith('.png')])
+                            for idx, name in enumerate(names):
+                                fb = zipf.read(name)
+                                nparr = np.asarray(bytearray(fb), dtype=np.uint8)
+                                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                process_frame(idx, img)
+                                progress_bar.progress((idx + 1) / num_frames)
+                                if not success: break
+                    elif dec_file.name.endswith('.gif'):
+                        import imageio
+                        reader = imageio.get_reader(file_bytes)
+                        for idx, frame in enumerate(reader):
+                            img = cv2.cvtColor(frame[:,:,:3], cv2.COLOR_RGB2BGR)
+                            process_frame(idx, img)
+                            progress_bar.progress((idx + 1) / num_frames)
+                            if not success: break
+                    else:
+                        process_frame(0, preview_img)
+                        progress_bar.progress(1.0)
+                elif input_source == "Live Camera Scan":
+                    process_frame(0, preview_img)
+                    progress_bar.progress(1.0)
+                
                 if success:
                     try:
                         if detected_mode_id == 2: # RGB + ZLIB
@@ -367,7 +430,29 @@ with tab2:
                         
                         if embedded_hash == calculated_hash:
                             st.success(f"✅ CRYPTOGRAPHIC VERIFICATION PASSED: File successfully recovered via Mode {detected_mode_id}")
-                            st.download_button("Download Verified File", original_payload, file_name="verified_payload.bin")
+                            st.download_button("Download Verified File", bytes(original_payload), file_name="verified_payload.bin")
+                            
+                            st.write("### Preview")
+                            
+                            # Detect filetype using magic bytes (file signatures)
+                            is_png = original_payload.startswith(b'\x89PNG\r\n\x1a\n')
+                            is_jpeg = original_payload.startswith(b'\xff\xd8\xff')
+                            is_gif = original_payload.startswith(b'GIF87a') or original_payload.startswith(b'GIF89a')
+                            is_mp4 = len(original_payload) > 8 and original_payload[4:8] == b'ftyp'
+                            is_webm = original_payload.startswith(b'\x1aE\xdf\xa3')
+                            
+                            if is_png or is_jpeg or is_gif:
+                                st.image(bytes(original_payload), width="stretch")
+                                st.success("Detected Image Format!")
+                            elif is_mp4 or is_webm:
+                                st.video(bytes(original_payload))
+                                st.success("Detected Video Format!")
+                            else:
+                                try:
+                                    text_preview = original_payload.decode('utf-8')
+                                    st.text_area("Decoded Text Content", text_preview, height=200)
+                                except UnicodeDecodeError:
+                                    st.info("The decoded file is binary data (unrecognized format). Please download it and rename it with the correct extension (e.g., .pdf, .exe) to view it.")
                         else:
                             st.error("❌ VERIFICATION FAILED: The decoded file is corrupted and does not match the original signature!")
                     except Exception as e:
